@@ -1,8 +1,8 @@
 from typing import List
-import numpy as np
 from pathlib import Path
 import re
 from vocabulary import Vocabulary
+from config import cfg
 import pickle
 
 class Punctuation:
@@ -81,15 +81,8 @@ def build_dataset(files: List[Path], vocab: Vocabulary, window_size: int):
 
 
 if __name__ == '__main__':
-    DATA_DIR = "./data"
-    TRAIN_FILE = "ca.wiki.train.tokens"
-    FILES = ["ca.wiki.test.tokens", "ca.wiki.valid.tokens"]
-    FILES.append(TRAIN_FILE)
-
-    WINDOW_SIZE = 7
-
-    data_dir = Path(DATA_DIR)
-
+    FILES = [cfg.VALID_FILE, cfg.TEST_FILE, cfg.TRAIN_FILE]
+    data_dir = Path(cfg.DATA_DIR)
     vocab_file = data_dir / 'vocab.pickle'
 
     if vocab_file.exists() and vocab_file.is_file():
@@ -99,7 +92,7 @@ if __name__ == '__main__':
     else:
         print("Vocabulary file does not exist, building...")
         vocabulary = build_vocabulary(
-            train_file=data_dir / TRAIN_FILE, 
+            train_file=data_dir / cfg.TRAIN_FILE, 
             vocab_file=vocab_file
         )
 
@@ -108,5 +101,5 @@ if __name__ == '__main__':
     build_dataset(
         files=[data_dir / x for x in FILES], 
         vocab=vocabulary, 
-        window_size=WINDOW_SIZE
+        window_size=cfg.WINDOW_SIZE
     )
