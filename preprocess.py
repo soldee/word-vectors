@@ -1,9 +1,11 @@
 from typing import List
 from pathlib import Path
 import re
+import pickle
+import numpy as np
+
 from vocabulary import Vocabulary
 from config import cfg
-import pickle
 
 class Punctuation:
     def __init__(self):
@@ -23,7 +25,7 @@ class Punctuation:
             s
         ).strip()
 
-def build_vocabulary(train_file: Path, vocab_file: Path) -> Vocabulary:
+def build_vocabulary(train_file: Path, vocab_file: Path, threshold: int) -> Vocabulary:
     vocab = Vocabulary()
     punctuation = Punctuation()
 
@@ -35,7 +37,7 @@ def build_vocabulary(train_file: Path, vocab_file: Path) -> Vocabulary:
                 processed_line = punctuation.clean(line)
                 for token in processed_line.split():
                     counter += 1
-                    vocab.add_token(token)
+                    vocab.add_token(token, threshold)
 
     print(f"Number of tokens (with punctuation processed) = {counter}")
     vocab.save(vocab_file)
@@ -49,7 +51,13 @@ def build_dataset(files: List[Path], vocab: Vocabulary, window_size: int):
         print(f"Builiding dataset for file '{file}'")
 
         with open(file, 'r') as f:
+            i = 0
+            kept = 0
+            samples = []
+            targets = []
+
             for line in f:
+                i += 1
                 line = line.strip().rstrip()
                 if line:
                     processed_line = punctuation.clean(line)
@@ -64,20 +72,20 @@ def build_dataset(files: List[Path], vocab: Vocabulary, window_size: int):
                     if len(token_line) < left_window:
                         continue
 
-                    samples = []
-                    targets = []
+                    kept += 1
 
                     aux_line = [vocabulary.pad_idx] * left_window + token_line + [vocabulary.pad_idx] * right_window
                     for i, token_idx in enumerate(token_line):
                         samples.append(aux_line[i:(i+left_window)] + aux_line[(i+left_window+1):(i+window_size)])
                         targets.append(token_idx)
 
+        print(f"Kept {kept}/{i} lines in file '{file}'")
         print(f"Writing targets and samples for file '{file}'")
         with open(file.with_name(file.name + ".x.np"), 'wb') as f:
-            pickle.dump(samples, f)
+            pickle.dump(np.array(samples), f)
 
         with open(file.with_name(file.name + ".y.np"), 'wb') as f:
-            pickle.dump(targets, f)
+            pickle.dump(np.array(targets), f)
 
 
 if __name__ == '__main__':
@@ -93,7 +101,8 @@ if __name__ == '__main__':
         print("Vocabulary file does not exist, building...")
         vocabulary = build_vocabulary(
             train_file=data_dir / cfg.TRAIN_FILE, 
-            vocab_file=vocab_file
+            vocab_file=vocab_file,
+            threshold=cfg.VOCAB_THRESHOLD
         )
 
     print(f"Vocabulary length = {len(vocabulary)}")

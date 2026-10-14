@@ -2,12 +2,11 @@ import pickle
 from pathlib import Path
 
 class Vocabulary:
-    def __init__(self, threshold=10, unk_token: str = "<unk>", pad_token: str = "<pad>"):
+    def __init__(self, unk_token: str = "<unk>", pad_token: str = "<pad>"):
         self.token2idx = {}
         self.idx2token = []
         self.token2counter = {}
         self._len = 0
-        self.threshold = threshold
 
         self.unk_idx = self._add_token_own(unk_token)
         self.pad_idx = self._add_token_own(pad_token)
@@ -19,10 +18,10 @@ class Vocabulary:
         self._len += 1
         return idx
 
-    def add_token(self, token):
+    def add_token(self, token: str, threshold: int):
         if token not in self.token2idx:
             count = self.token2counter[token] = self.token2counter.get(token, 0) + 1
-            if count > self.threshold:
+            if count > threshold:
                 self.idx2token.append(token)
                 self.token2idx[token] = self._len
                 self._len += 1
