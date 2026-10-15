@@ -3,13 +3,40 @@ import torch
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
+import re
+import json
 
 from config import cfg
 from vocabulary import Vocabulary
 
 class CBOW(nn.Module):
-    def __init__(self, num_embeddings: int, embedding_dim: int, padding_idx: int):
+    def __init__(self, num_embeddings: int, embedding_dim: int, padding_idx: int, mode: int, window_size: int):
         super().__init__()
+        self.mode = mode
+
+        match mode:
+            case 1:
+                print("Selected CBOW mode 1: Weighted context words by proximity to the central word")
+                window_left = window_size // 2
+                weights_l = [i for i in range(1, window_left+1)]
+                weights_r = [i for i in range(1, (window_size-window_left))]
+                weights_r.reverse()
+
+                # for a window of size 7: weights=[1,2,3,3,2,1]
+                weights_l.extend(weights_r)
+                print(f"Using fixed weights: {weights_l}")
+                # the view is used to unsqueeze (add dimensions to left and right)
+                #   the embeddings outputs will be (B,C,E) and we need to multiply the weights along the C dimension)
+                weights: torch.Tensor = torch.tensor(weights_l).view(1, -1, 1)
+                self.register_buffer('weights', weights)
+            case 2:
+                print("Selected CBOW mode 2: Learnable context word's weights (Scalar)")
+                self.weights = nn.Parameter(torch.randn(window_size-1).view(1, -1, 1), requires_grad=True)
+            case 3:
+                print("Selected CBOW mode 3: Learnable context word's weights (Vector)")
+                self.weights = nn.Parameter(torch.randn(1, window_size-1, embedding_dim), requires_grad=True)
+            case _:
+                print("Selected CBOW mode: Standard CBOW")
 
         # size of matrix = num_embeddings x embedding_dim
         self.embedding = nn.Embedding(
@@ -29,11 +56,19 @@ class CBOW(nn.Module):
         # (B, C)
         emb: torch.Tensor = self.embedding(x)
         # (B, C, E)
-        u = emb.sum(dim=1) # sum C vectors element-wise 
+
+        if self.mode in (1, 2, 3):
+            emb = self.embedding(x)
+            # (B, C, E)
+            emb = emb * self.weights
+            # (B, C, E)
+        
+        u = emb.sum(dim=1) # sum C vectors element-wise
         # (B, E)
         z = self.linear(u)
         # (B, C)
         return z
+        
 
 class CorpusDataset(Dataset):
     def __init__(self, x_file: Path, y_file: Path):
@@ -121,7 +156,9 @@ if __name__ == '__main__':
     model = CBOW(
         num_embeddings=len(vocabulary),
         embedding_dim=cfg.EMBEDDING_DIM,
-        padding_idx=vocabulary.pad_idx
+        padding_idx=vocabulary.pad_idx,
+        mode=cfg.CBOW_MODE,
+        window_size=cfg.WINDOW_SIZE
     ).to(device)
 
     print(model)
@@ -143,47 +180,91 @@ if __name__ == '__main__':
     )
 
     val_dataset = CorpusDataset(
-        x_file=data_dir / (cfg.TRAIN_FILE + ".x.np"),
-        y_file=data_dir / (cfg.TRAIN_FILE + ".y.np")
+        x_file=data_dir / (cfg.VALID_FILE + ".x.np"),
+        y_file=data_dir / (cfg.VALID_FILE + ".y.np")
     )
     val_loader = DataLoader(
-        dataset=train_dataset,
+        dataset=val_dataset,
         batch_size=cfg.BATCH_SIZE//4,
         shuffle=False
     )
 
     checkpoint_dir = Path(cfg.CHECKPOINT_DIR)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    metadata_dir = Path(cfg.METADATA_DIR)
+    metadata_dir.mkdir(parents=True, exist_ok=True)
 
-    train_accuracy = []
-    val_accuracy = []
+    max_epoch = 0
+    checkpoint_file: Path | None = None
 
-    for epoch in range(cfg.EPOCHS):
+    for file in checkpoint_dir.iterdir():
+        if file.name.startswith(f"cbow_mode_{cfg.CBOW_MODE}_epoch"):
+            epoch_match = re.search('epoch_(.+?).pt', file.name)
+            if epoch_match:
+                try:
+                    epoch = int(epoch_match.group(1))
+                    if checkpoint_file is None or epoch > max_epoch:
+                        max_epoch = epoch
+                        checkpoint_file = file
+                except ValueError as e:
+                    print(f"Invalid checkpoint file name. Unable to extract epoch: {file.name}")
+
+    if checkpoint_file is None:
+        print(f"No checkpoints to resume from found at '{cfg.CHECKPOINT_DIR}'. Starting training from scratch.")
+    else:
+        print(f"Found checkpoint to resume from: '{checkpoint_file}' at epoch {max_epoch}/{cfg.EPOCHS-1}")
+        max_epoch += 1
+        if max_epoch == (cfg.EPOCHS):
+            print(f"Model already trained for {cfg.EPOCHS}. Either increase the number of epochs or delete the trained models.")
+            exit(0)
+
+        checkpoint = torch.load(checkpoint_file, weights_only=True)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+    history = {
+        "train_loss": [],
+        "val_loss": [],
+        "train_acc": [],
+        "val_acc": []
+    }
+
+    for epoch in range(max_epoch, cfg.EPOCHS):
         print(f"EPOCH {epoch}/{cfg.EPOCHS-1}")
-        train_acc, loss = train(model, criterion, optimizer, train_loader, device)
-        train_accuracy.append(train_acc)
+        train_acc, train_loss = train(model, criterion, optimizer, train_loader, device)
+        
+        valid_acc, valid_loss = validate(model, criterion, val_loader, device)
+        print(f"\nVALIDATE: accuracy={valid_acc:.2f}, loss={valid_loss:.2f}", end="\n\n\n")
 
-        valid_acc, loss = validate(model, criterion, val_loader, device)
-        val_accuracy.append(valid_acc)
-        print(f"\nVALIDATE: accuracy={valid_acc:.2f}, loss={loss:.2f}", end="\n\n\n")
+        # checkpoint metadata
+        history["val_acc"].append(valid_acc)
+        history["val_loss"].append(valid_loss)
+        history["train_loss"].append(train_loss)
+        history["train_acc"].append(train_acc)
 
-        # checkpoint
+        checkpoint_name = f"cbow_mode_{cfg.CBOW_MODE}_epoch_{epoch}"
+        metadata_file = metadata_dir / f"{checkpoint_name}.json"
+        with open(metadata_file, "w") as f:
+            json.dump(history, f, indent=2)
+
+        # checkpoint model
         checkpoint = {
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
-            'loss': loss,
+            'loss': train_loss,
             'train_accuracy': train_acc,
             'valid_accuracy': valid_acc
         }
-        torch.save(checkpoint, checkpoint_dir / f"cbow_epoch_{epoch}.pt")
+        checkpoint_file = checkpoint_dir / f"{checkpoint_name}.pt"
+        torch.save(checkpoint, checkpoint_file)
 
     test_dataset = CorpusDataset(
-        x_file=data_dir / (cfg.TRAIN_FILE + ".x.np"),
-        y_file=data_dir / (cfg.TRAIN_FILE + ".y.np")
+        x_file=data_dir / (cfg.TEST_FILE + ".x.np"),
+        y_file=data_dir / (cfg.TEST_FILE + ".y.np")
     )
     test_loader = DataLoader(
-        dataset=train_dataset,
+        dataset=val_dataset,
         batch_size=cfg.BATCH_SIZE,
         shuffle=False
     )
