@@ -264,7 +264,7 @@ if __name__ == '__main__':
         y_file=data_dir / (cfg.TEST_FILE + ".y.np")
     )
     test_loader = DataLoader(
-        dataset=val_dataset,
+        dataset=test_dataset,
         batch_size=cfg.BATCH_SIZE,
         shuffle=False
     )
